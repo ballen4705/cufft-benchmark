@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <time.h>
 #include <math.h>
-#include <algorithm>
 #include <nvml.h>
 
 #define CHECK_CUDA_ERROR(call) \
@@ -24,7 +24,6 @@ do { \
         exit(1); \
     } \
 } while (0)
-
 
 // Load lengths of different trials from a file, including descriptions
 #define LINE_LEN 128
@@ -59,8 +58,14 @@ int load_lengths(const char* filename, int* ntrials, long long** nffts, char (**
     return 0;
 }
 
-int main(int argc, char **argv) {
+// For standard C sorting
+int compare_floats(const void* a, const void* b) {
+    float fa = *(const float*)a;
+    float fb = *(const float*)b;
+    return (fa > fb) - (fa < fb);  // returns 1, 0, or -1
+}
 
+int main(int argc, char **argv) {
     long long num_iterations = 100;
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
@@ -81,11 +86,6 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr,"Driver version: %s\n", version_str);
 
-    /*
-    int ntrials=6;
-    long long nffts[ntrials] = {1L<<23, 1L<<28, (1L<< 27) * 3, (1L << 26) * 7, 1L<<29, 1L<<30};
-    std::string* description = new std::string[ntrials]{"2^23", "2^28", "2^27 * 3", "2^26 * 7", "2^29", "2^30"};
-    */
     // Read file containing the different FFT lengths to try
     int ntrials;
     long long* nffts;
@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
        fprintf(stderr, "Failed to load Lengths.txt\n");
        exit(1);
     }
-    printf("Testing %d FFT lengths, ranging from %d to %d.\n", ntrials,nffts[0],nffts[ntrials-1]);
+    printf("Testing %d FFT lengths, ranging from %d to %d.\n", ntrials, nffts[0], nffts[ntrials-1]);
         
     for (int i = 0; i < ntrials; i++){
         long long n = nffts[i];
@@ -125,7 +125,6 @@ int main(int argc, char **argv) {
         float output_size_gb = n*8.0/1e9;
         fprintf(stderr,"Output complex array size: %lf GB \n", output_size_gb);
 
-
         // Allocate memory on host
         host_input_data = (float*) malloc(n * batch * sizeof(float));
 
@@ -137,7 +136,7 @@ int main(int argc, char **argv) {
         //get size estimate
         cufftResult result = cufftEstimate1d(n, CUFFT_R2C, batch, &work_size);
         float work_size_gb = work_size/1.0e9;
-        fprintf(stderr,"Work size estimate: %lf GB\n", work_size_gb);
+        fprintf(stderr, "Work size estimate: %lf GB\n", work_size_gb);
         fprintf(stderr, "Total size estimate: %lf GB\n", input_size_gb + output_size_gb + work_size_gb);
 
         // Allocate memory on device
@@ -170,14 +169,12 @@ int main(int argc, char **argv) {
             times[iter] = elapsed_time;    
         }
 
-        std::sort(times, times + num_iterations);
-        if (num_iterations % 2 == 0) {
-            median_time = (times[num_iterations / 2 - 1] + times[num_iterations / 2]) / 2.0;
-        } else {
-            median_time = times[num_iterations / 2];
-        }
-
-
+	qsort(times, num_iterations, sizeof(float), compare_floats);
+	if (num_iterations % 2 == 0) {
+	   median_time = (times[num_iterations / 2 - 1] + times[num_iterations / 2]) / 2.0f;
+	} else {
+	   median_time = times[num_iterations / 2];
+	}
         mean_time = mean_time / num_iterations;
 
         fprintf(stderr,"Mean time: %f ms for length %s\n", mean_time, description[i]);
