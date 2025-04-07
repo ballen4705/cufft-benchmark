@@ -4,7 +4,6 @@
 #include <cufft.h>
 #include <time.h>
 #include <math.h>
-#include <string>
 #include <algorithm>
 #include <nvml.h>
 
@@ -26,9 +25,43 @@ do { \
     } \
 } while (0)
 
+
+// Load lengths of different trials from a file, including descriptions
+#define LINE_LEN 128
+int load_lengths(const char* filename, int* ntrials, long long** nffts, char (**description)[LINE_LEN]) {
+    int count = 0;
+    char buffer[256];
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+       perror(filename);
+       return 1;
+    }
+    // First pass: count lines
+    while (fgets(buffer, sizeof(buffer), f)) count++;
+    *ntrials = count; 
+    // Allocate memory
+    *nffts = (long long *)malloc(count * sizeof(long long));
+    *description = (char (*)[LINE_LEN])malloc(count * LINE_LEN * sizeof(char));
+    if (!*nffts || !*description) {
+        fprintf(stderr, "Memory allocation failed\n");
+        fclose(f);
+        return 2;
+    }
+    // Second pass: read and parse
+    rewind(f);
+    for (int i = 0; i < count; i++) {
+        if (!fgets(buffer, sizeof(buffer), f)) break;
+        sscanf(buffer, "%lld =", &((*nffts)[i]));
+        strncpy((*description)[i], buffer, LINE_LEN - 1);
+        (*description)[i][LINE_LEN - 1] = '\0';
+    }
+    fclose(f);
+    return 0;
+}
+
 int main(int argc, char **argv) {
 
-    long long num_iterations;
+    long long num_iterations = 100;
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     fprintf(stderr,"CUDA version: %d.%d\n", CUDART_VERSION / 1000, (CUDART_VERSION % 100) / 10);
@@ -48,17 +81,26 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr,"Driver version: %s\n", version_str);
 
-    num_iterations = 100;
+    /*
     int ntrials=6;
     long long nffts[ntrials] = {1L<<23, 1L<<28, (1L<< 27) * 3, (1L << 26) * 7, 1L<<29, 1L<<30};
     std::string* description = new std::string[ntrials]{"2^23", "2^28", "2^27 * 3", "2^26 * 7", "2^29", "2^30"};
-
+    */
+    // Read file containing the different FFT lengths to try
+    int ntrials;
+    long long* nffts;
+    char (*description)[LINE_LEN];
+    if (load_lengths("Lengths.txt", &ntrials, &nffts, &description) != 0) {
+       fprintf(stderr, "Failed to load Lengths.txt\n");
+       exit(1);
+    }
+    printf("Testing %d FFT lengths, ranging from %d to %d.\n", ntrials,nffts[0],nffts[ntrials-1]);
+        
     for (int i = 0; i < ntrials; i++){
         long long n = nffts[i];
         fprintf(stderr,"**************************************\n");
-        fprintf(stderr,"N-point FFT: %lld (%s)\n", nffts[i], description[i].c_str());
+        fprintf(stderr,"N-point FFT: %s\n", description[i]);
         fprintf(stderr,"Number of iterations: %lld \n", num_iterations);
-
 
         int batch = 1;
         int rank = 1;
@@ -72,7 +114,7 @@ int main(int argc, char **argv) {
         cufftHandle forward_plan;
         cudaEvent_t start, stop;
         float elapsed_time;
-        float *input_data, *output_data;
+        float *input_data;
         cufftComplex *fft_data;
         float *host_input_data;
         float mean_time, median_time;
@@ -100,20 +142,18 @@ int main(int argc, char **argv) {
 
         // Allocate memory on device
         CHECK_CUDA_ERROR(cudaMalloc((void**) &input_data, n * batch * sizeof(float)));
-        CHECK_CUDA_ERROR(cudaMalloc((void**) &fft_data, n * batch * sizeof(cufftComplex)));
-        CHECK_CUDA_ERROR(cudaMalloc((void**) &output_data, n * batch * sizeof(float)));
+        CHECK_CUDA_ERROR(cudaMalloc((void**) &fft_data, (n/2 + 1) * batch * sizeof(cufftComplex)));
 
         // Create FFT plan
         CHECK_CUFFT_ERROR(cufftCreate(&forward_plan));
         CHECK_CUFFT_ERROR(cufftMakePlanMany64(forward_plan, rank, nembed, inembed, istride, idist, onembed, ostride, odist, CUFFT_R2C, batch, &work_size));
-
 
         // Copy input data to device
         CHECK_CUDA_ERROR(cudaMemcpy(input_data, host_input_data, n * batch * sizeof(float), cudaMemcpyHostToDevice));
 
         mean_time = 0.0;
 
-        //Calculate median time
+        // Record FFT times
         float times[num_iterations];
         for (int iter = 0; iter < num_iterations; iter++) {
             elapsed_time = 0.0;
@@ -122,7 +162,6 @@ int main(int argc, char **argv) {
             CHECK_CUDA_ERROR(cudaEventRecord(start, 0));
 
             CHECK_CUFFT_ERROR(cufftExecR2C(forward_plan, input_data, fft_data));
-
 
             CHECK_CUDA_ERROR(cudaEventRecord(stop, 0));
             CHECK_CUDA_ERROR(cudaEventSynchronize(stop));
@@ -141,13 +180,13 @@ int main(int argc, char **argv) {
 
         mean_time = mean_time / num_iterations;
 
-        fprintf(stderr,"Mean time: %f ms\n", mean_time);
-        fprintf(stderr,"Median time: %f ms\n", median_time);
+        fprintf(stderr,"Mean time: %f ms for length %s\n", mean_time, description[i]);
+        fprintf(stderr,"Median time: %f ms for length %s\n", median_time, description[i]);
 
         // Free memory
         free(host_input_data);
         CHECK_CUDA_ERROR(cudaFree(input_data));
-        CHECK_CUDA_ERROR(cudaFree(output_data));
+        CHECK_CUDA_ERROR(cudaFree(fft_data));
         CHECK_CUFFT_ERROR(cufftDestroy(forward_plan));
     }
 
